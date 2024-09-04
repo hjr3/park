@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::{Arg, Command};
+use futures_util::future::join;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -72,29 +73,83 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
 
-    let listener = TcpListener::bind(addr).await?;
-    tracing::info!("Listening on {}", listener.local_addr()?);
-
-    loop {
-        let (stream, _) = listener.accept().await?;
-
-        let io = TokioIo::new(stream);
-
-        let config = config.clone();
-        let state = state.clone();
-        tokio::task::spawn(async move {
-            if let Err(err) = http1::Builder::new()
-                .preserve_header_case(true)
-                .title_case_headers(true)
-                .serve_connection(
-                    io,
-                    service_fn(move |req| park::proxy(config.clone(), state.clone(), req)),
-                )
-                .with_upgrades()
+    let proxy_config = config.clone();
+    let proxy_state = state.clone();
+    let proxy_srv = async move {
+        let listener = TcpListener::bind(addr).await.expect("Proxy failed to bind");
+        tracing::info!(
+            "Proxy listening on {}",
+            listener
+                .local_addr()
+                .expect("Proxy failed to get local address")
+        );
+        loop {
+            let (stream, _) = listener
+                .accept()
                 .await
-            {
-                eprintln!("Error serving connection: {:?}", err);
-            }
-        });
-    }
+                .expect("Proxy failed to accept connection");
+
+            let io = TokioIo::new(stream);
+
+            let config = proxy_config.clone();
+            let state = proxy_state.clone();
+            tokio::task::spawn(async move {
+                if let Err(err) = http1::Builder::new()
+                    .preserve_header_case(true)
+                    .title_case_headers(true)
+                    .serve_connection(
+                        io,
+                        service_fn(move |req| {
+                            park::proxy::proxy(config.clone(), state.clone(), req)
+                        }),
+                    )
+                    .with_upgrades()
+                    .await
+                {
+                    eprintln!("Error serving connection: {:?}", err);
+                }
+            });
+        }
+    };
+
+    let api_config = config.clone();
+    let api_state = state.clone();
+    let api_srv = async move {
+        let listener = TcpListener::bind("127.0.0.1:9000")
+            .await
+            .expect("API failed to bind");
+        tracing::info!(
+            "API listening on {}",
+            listener
+                .local_addr()
+                .expect("API failed to get local address")
+        );
+        loop {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("API failed to accept connection");
+
+            let io = TokioIo::new(stream);
+
+            let config = api_config.clone();
+            let state = api_state.clone();
+            tokio::task::spawn(async move {
+                if let Err(err) = http1::Builder::new()
+                    .serve_connection(
+                        io,
+                        service_fn(move |req| park::api::api(config.clone(), state.clone(), req)),
+                    )
+                    .with_upgrades()
+                    .await
+                {
+                    eprintln!("Error serving connection: {:?}", err);
+                }
+            });
+        }
+    };
+
+    let _ret = join(proxy_srv, api_srv).await;
+
+    Ok(())
 }

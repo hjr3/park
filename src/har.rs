@@ -1,8 +1,10 @@
+use anyhow::{anyhow, Result};
 use har::v1_3::{Cache, Content, Creator, Entries, Log, PostData, Request, Response, Timings};
-use http_body_util::BodyExt;
-use serde::Serialize;
+use http_body_util::{combinators::BoxBody, BodyExt, Full};
+use hyper::body::Bytes;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Har(Log);
 
 impl Har {
@@ -106,6 +108,41 @@ impl Har {
         };
 
         Har(log)
+    }
+}
+
+impl TryFrom<Har> for hyper::Request<BoxBody<Bytes, std::convert::Infallible>> {
+    type Error = anyhow::Error;
+
+    fn try_from(mut har: Har) -> Result<Self> {
+        if har.0.entries.len() != 1 {
+            return Err(anyhow!("Expected exactly one entry in HAR log"));
+        }
+
+        let request = har
+            .0
+            .entries
+            .pop()
+            .expect("Expected exactly one entry in HAR log")
+            .request;
+
+        let mut req = hyper::Request::builder()
+            .method(request.method.as_str())
+            .uri(request.url.as_str());
+
+        for header in request.headers.iter() {
+            req = req.header(header.name.as_str(), header.value.as_str());
+        }
+
+        let body: BoxBody<Bytes, std::convert::Infallible> = match request.post_data {
+            Some(post_data) => match post_data.text {
+                Some(text) => Full::new(Bytes::from(text)).boxed(),
+                None => Full::new(Bytes::new()).boxed(),
+            },
+            None => Full::new(Bytes::new()).boxed(),
+        };
+
+        Ok(req.body(body)?)
     }
 }
 
