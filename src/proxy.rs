@@ -7,8 +7,10 @@ use hyper::client::conn::http1::Builder;
 use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
+use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
+use url::Host;
 
 use futures_util::stream::StreamExt;
 use tokio::sync::broadcast;
@@ -66,8 +68,20 @@ where
             Ok(resp)
         }
     } else {
-        let ip = config.server.addr.ip();
-        let port = config.server.addr.port();
+        let ip = match config.server.address.host() {
+            Some(Host::Domain(domain)) => {
+                let response = state.resolver.lookup_ip(domain).await?;
+                response
+                    .iter()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("No IP found"))?
+            }
+            Some(Host::Ipv4(ip)) => IpAddr::V4(ip),
+            Some(Host::Ipv6(ip)) => IpAddr::V6(ip),
+            None => anyhow::bail!("No host provided"),
+        };
+
+        let port = config.server.address.port_or_known_default().unwrap_or(80);
 
         let stream = TcpStream::connect((ip, port)).await.unwrap();
         let io = TokioIo::new(stream);

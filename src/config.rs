@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::net::SocketAddr;
+use url::Url;
 
 #[derive(Deserialize)]
 pub struct Config {
@@ -14,7 +14,9 @@ impl Default for Config {
                 url: "sqlite::memory:".to_string(),
             },
             server: Server {
-                addr: "127.0.0.1:0".parse().expect("default address is valid"),
+                address: "http://127.0.0.1"
+                    .parse()
+                    .expect("default address is valid"),
             },
         }
     }
@@ -27,5 +29,5 @@ pub struct Database {
 
 #[derive(Deserialize)]
 pub struct Server {
-    pub addr: SocketAddr,
+    pub address: Url,
 }

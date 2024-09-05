@@ -16,8 +16,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let matches = Command::new("park")
         .about("Generate har files for proxied requests")
         .arg(
-            Arg::new("url_or_socket")
-                .help("The URL or socket to connect to. Example: http://example.com or 127.0.0.1:8080")
+            Arg::new("address")
+                .help("The URL or socket to send requests to. Example: http://example.com or 127.0.0.1:8080")
                 .index(1),
         )
         .arg(
@@ -31,14 +31,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .long("config")
                 .help("Path to the configuration file")
                 .value_name("FILE")
-                .conflicts_with("url_or_socket"),
+                .conflicts_with("address"),
         )
         .get_matches();
 
-    let config: Config = if let Some(url_or_socket) = matches.get_one::<String>("url_or_socket") {
+    let config: Config = if let Some(address) = matches.get_one::<String>("address") {
         let mut config = Config::default();
-        // TODO support full URLs
-        config.server.addr = url_or_socket.parse::<SocketAddr>()?;
+
+        let address = if let Ok(socket) = address.parse::<SocketAddr>() {
+            url::Url::parse(&format!("http://{}", socket))?
+        } else if let Ok(url) = url::Url::parse(address) {
+            url
+        } else {
+            eprintln!("Invalid address: {}", address);
+            std::process::exit(1);
+        };
+        // TODO make sure host and port are valid
+        config.server.address = address;
         config
     } else if let Some(config_file) = matches.get_one::<String>("config") {
         let content = std::fs::read_to_string(config_file)?;
@@ -64,8 +73,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     let config = Arc::new(config);
+    let resolver = hickory_resolver::TokioAsyncResolver::tokio_from_system_conf()?;
+
     let state = park::AppState {
         db: sqlx::SqlitePool::connect(&config.database.url).await?,
+        resolver,
     };
 
     let mut conn = state.db.acquire().await?;
