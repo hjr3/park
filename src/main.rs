@@ -73,11 +73,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     let config = Arc::new(config);
-    let resolver = hickory_resolver::TokioAsyncResolver::tokio_from_system_conf()?;
+    let client = reqwest::ClientBuilder::new()
+        .timeout(
+            config
+                .server
+                .client_timeout
+                .or(Some(100))
+                .map(std::time::Duration::from_secs)
+                .expect("Client timeout must be set"),
+        )
+        .build()?;
 
     let state = park::AppState {
         db: sqlx::SqlitePool::connect(&config.database.url).await?,
-        resolver,
+        client,
     };
 
     let mut conn = state.db.acquire().await?;

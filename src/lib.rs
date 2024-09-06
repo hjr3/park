@@ -7,5 +7,5 @@ pub mod proxy;
 #[derive(Clone)]
 pub struct AppState {
     pub db: sqlx::SqlitePool,
-    pub resolver: hickory_resolver::TokioAsyncResolver,
+    pub client: reqwest::Client,
 }

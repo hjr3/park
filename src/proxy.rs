@@ -3,14 +3,12 @@ use http_body_util::BodyStream;
 use http_body_util::StreamBody;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::body::{Body, Bytes, Frame};
-use hyper::client::conn::http1::Builder;
 use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
-use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use url::Host;
+use url::{Host, Url};
 
 use futures_util::stream::StreamExt;
 use tokio::sync::broadcast;
@@ -30,6 +28,7 @@ where
     B: Body + std::fmt::Debug + std::marker::Unpin + Send + 'static,
     B::Data: Clone + Default + Send + 'static,
     B::Error: Into<anyhow::Error> + std::fmt::Display,
+    hyper::body::Bytes: From<<B as hyper::body::Body>::Data>,
 {
     tracing::info!("{:?}", req);
 
@@ -68,35 +67,15 @@ where
             Ok(resp)
         }
     } else {
-        let ip = match config.server.address.host() {
-            Some(Host::Domain(domain)) => {
-                let response = state.resolver.lookup_ip(domain).await?;
-                response
-                    .iter()
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("No IP found"))?
-            }
-            Some(Host::Ipv4(ip)) => IpAddr::V4(ip),
-            Some(Host::Ipv6(ip)) => IpAddr::V6(ip),
+        // TODO can we avoid clone?
+        let domain = match config.server.address.host() {
+            Some(Host::Domain(domain)) => domain.to_string(),
+            Some(Host::Ipv4(ip)) => ip.to_string(),
+            Some(Host::Ipv6(ip)) => ip.to_string(),
             None => anyhow::bail!("No host provided"),
         };
 
         let port = config.server.address.port_or_known_default().unwrap_or(80);
-
-        let stream = TcpStream::connect((ip, port)).await.unwrap();
-        let io = TokioIo::new(stream);
-
-        let (mut sender, conn) = Builder::new()
-            .preserve_header_case(true)
-            .title_case_headers(true)
-            .handshake(io)
-            .await?;
-
-        tokio::task::spawn(async move {
-            if let Err(err) = conn.await {
-                println!("Connection failed: {:?}", err);
-            }
-        });
 
         let (head, body) = req.into_parts();
         let (tx, upstream_rx) = broadcast::channel(16);
@@ -123,27 +102,31 @@ where
             }
         });
 
-        let upstream_stream = BroadcastStream::new(upstream_rx).map(|b| match b {
-            Ok(bytes) => Ok(Frame::data(bytes)),
-            Err(e) => Err(e),
-        });
-        let upstream_body = StreamBody::new(upstream_stream);
-        let upstream_req = Request::from_parts(head.clone(), upstream_body);
+        let upstream_stream = BroadcastStream::new(upstream_rx);
+        let upstream_url = Url::parse(&format!("http://{}:{}{}", domain, port, head.uri)).unwrap();
+        let upstream_req = state
+            .client
+            .request(Method::try_from(&head.method)?, upstream_url)
+            .version(head.version)
+            .headers(head.headers.clone())
+            .body(reqwest::Body::wrap_stream(upstream_stream))
+            .build()?;
 
-        let resp = sender.send_request(upstream_req).await?;
+        let resp = state.client.execute(upstream_req).await?;
 
-        let (response_head, resp_body) = resp.into_parts();
+        let resp_status = resp.status();
+        let resp_version = resp.version();
+        let resp_extension = resp.extensions().clone();
+        let resp_headers = resp.headers().clone();
+        let mut resp_body = resp.bytes_stream();
+
         let (resp_tx, downstream_rx) = broadcast::channel(16);
         let har_response_rx = resp_tx.subscribe();
 
         tokio::spawn(async move {
-            let mut body_stream = BodyStream::new(resp_body);
-
-            while let Some(chunk_result) = body_stream.next().await {
+            while let Some(chunk_result) = resp_body.next().await {
                 match chunk_result {
-                    Ok(chunk) => {
-                        // FIXME: handle all frame types
-                        let bytes = chunk.into_data().unwrap_or_default();
+                    Ok(bytes) => {
                         if resp_tx.send(bytes).is_err() {
                             // All receivers have dropped
                             break;
@@ -162,7 +145,16 @@ where
             Err(e) => Err(e.into()),
         });
         let downstream_body = StreamBody::new(downstream_stream);
-        let downstream_resp = Response::from_parts(response_head.clone(), downstream_body);
+        let mut downstream_resp = Response::builder()
+            .status(resp_status)
+            .version(resp_version)
+            .extension(resp_extension.clone());
+
+        for (key, value) in resp_headers.iter() {
+            downstream_resp = downstream_resp.header(key, value);
+        }
+
+        let downstream_resp = downstream_resp.body(downstream_body)?;
 
         tokio::spawn(async move {
             let har_stream = BroadcastStream::new(har_rx).map(|b| match b {
@@ -177,7 +169,22 @@ where
                 Err(e) => Err(e),
             });
             let har_body = StreamBody::new(har_stream);
-            let har_resp = Response::from_parts(response_head, har_body);
+            let mut har_resp = Response::builder()
+                .status(resp_status)
+                .version(resp_version)
+                .extension(resp_extension);
+
+            for (key, value) in resp_headers.iter() {
+                har_resp = har_resp.header(key, value);
+            }
+
+            let har_resp = match har_resp.body(har_body) {
+                Ok(resp) => resp,
+                Err(e) => {
+                    tracing::error!("Error while creating HAR response: {}", e);
+                    return;
+                }
+            };
 
             let har = har::Har::from_transaction(har_req, har_resp).await;
             let _ = db::insert_request(&state.db, &har).await.map_err(|e| {
