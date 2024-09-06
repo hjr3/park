@@ -8,7 +8,6 @@ use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use url::{Host, Url};
 
 use futures_util::stream::StreamExt;
 use tokio::sync::broadcast;
@@ -67,15 +66,7 @@ where
             Ok(resp)
         }
     } else {
-        // TODO can we avoid clone?
-        let domain = match config.server.address.host() {
-            Some(Host::Domain(domain)) => domain.to_string(),
-            Some(Host::Ipv4(ip)) => ip.to_string(),
-            Some(Host::Ipv6(ip)) => ip.to_string(),
-            None => anyhow::bail!("No host provided"),
-        };
-
-        let port = config.server.address.port_or_known_default().unwrap_or(80);
+        let mut upstream_url = config.server.address.clone();
 
         let (head, body) = req.into_parts();
         let (tx, upstream_rx) = broadcast::channel(16);
@@ -103,10 +94,12 @@ where
         });
 
         let upstream_stream = BroadcastStream::new(upstream_rx);
-        let upstream_url = Url::parse(&format!("http://{}:{}{}", domain, port, head.uri)).unwrap();
+
+        upstream_url.set_path(head.uri.path());
+
         let upstream_req = state
             .client
-            .request(Method::try_from(&head.method)?, upstream_url)
+            .request(From::from(&head.method), upstream_url)
             .version(head.version)
             .headers(head.headers.clone())
             .body(reqwest::Body::wrap_stream(upstream_stream))
