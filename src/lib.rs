@@ -1,6 +1,6 @@
 pub mod api;
 pub mod config;
-mod db;
+pub mod db;
 mod har;
 pub mod proxy;
 

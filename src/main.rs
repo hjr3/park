@@ -36,8 +36,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .get_matches();
 
     let config: Config = if let Some(address) = matches.get_one::<String>("address") {
-        let mut config = Config::default();
-
         let address = if let Ok(socket) = address.parse::<SocketAddr>() {
             url::Url::parse(&format!("http://{}", socket))?
         } else if let Ok(url) = url::Url::parse(address) {
@@ -47,21 +45,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             std::process::exit(1);
         };
         // TODO make sure host and port are valid
-        config.server.address = address;
-        config
+
+        // TODO support full IP addresses
+        let port = if let Some(bind) = matches.get_one::<String>("bind") {
+            bind.parse::<u16>().unwrap_or(0)
+        } else {
+            0
+        };
+        let bind = SocketAddr::from(([127, 0, 0, 1], port));
+
+        let config_str = format!(
+            r#"
+            [database]
+            uri = "sqlite::memory:"
+
+            [server]
+            address = "{address}"
+            bind = "{bind}"
+        "#
+        );
+
+        toml::from_str(config_str.as_str())?
     } else if let Some(config_file) = matches.get_one::<String>("config") {
         let content = std::fs::read_to_string(config_file)?;
         toml::from_str(&content)?
     } else {
         eprintln!("You must specify either a domain or a configuration file.");
         std::process::exit(1);
-    };
-
-    // TODO support full IP addresses
-    let port = if let Some(bind) = matches.get_one::<String>("bind") {
-        bind.parse::<u16>().unwrap_or(0)
-    } else {
-        0
     };
 
     tracing_subscriber::registry()
@@ -74,30 +84,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let config = Arc::new(config);
     let client = reqwest::ClientBuilder::new()
-        .timeout(
-            config
-                .server
-                .client_timeout
-                .or(Some(100))
-                .map(std::time::Duration::from_secs)
-                .expect("Client timeout must be set"),
-        )
+        .timeout(std::time::Duration::from_secs(config.server.server_timeout))
         .build()?;
+    let db = park::db::init_db(&config.database).await?;
 
-    let state = park::AppState {
-        db: sqlx::SqlitePool::connect(&config.database.url).await?,
-        client,
-    };
+    let state = park::AppState { db, client };
 
     let mut conn = state.db.acquire().await?;
     sqlx::migrate!().run(&mut conn).await?;
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-
     let proxy_config = config.clone();
     let proxy_state = state.clone();
     let proxy_srv = async move {
-        let listener = TcpListener::bind(addr).await.expect("Proxy failed to bind");
+        let listener = TcpListener::bind(proxy_config.server.bind)
+            .await
+            .expect("Proxy failed to bind");
         tracing::info!(
             "Proxy listening on {}",
             listener
