@@ -42,15 +42,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             eprintln!("Invalid address: {}", address);
             std::process::exit(1);
         };
-        // TODO make sure host and port are valid
 
-        // TODO support full IP addresses
-        let port = if let Some(bind) = matches.get_one::<String>("bind") {
-            bind.parse::<u16>().unwrap_or(0)
+        let bind = if let Some(bind) = matches.get_one::<String>("bind") {
+            if let Ok(port) = bind.parse::<u16>() {
+                SocketAddr::from(([127, 0, 0, 1], port))
+            } else if let Ok(socket) = bind.parse::<SocketAddr>() {
+                socket
+            } else {
+                eprintln!("Invalid bind: {}", bind);
+                std::process::exit(1);
+            }
         } else {
-            0
+            eprintln!("You must specify a bind socket or port.");
+            std::process::exit(1);
         };
-        let bind = SocketAddr::from(([127, 0, 0, 1], port));
 
         let config_str = format!(
             r#"
@@ -63,10 +68,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "#
         );
 
-        toml::from_str(config_str.as_str())?
+        match toml::from_str(config_str.as_str()) {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("Error in configuration: {}", err);
+                std::process::exit(1);
+            }
+        }
     } else if let Some(config_file) = matches.get_one::<String>("config") {
         let content = std::fs::read_to_string(config_file)?;
-        toml::from_str(&content)?
+        match toml::from_str(&content) {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("Error in configuration: {}", err);
+                std::process::exit(1);
+            }
+        }
     } else {
         eprintln!("You must specify either a domain or a configuration file.");
         std::process::exit(1);
@@ -116,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .with_upgrades()
                     .await
                 {
-                    eprintln!("Error serving connection: {:?}", err);
+                    tracing::error!("Error serving proxy: {:?}", err);
                 }
             });
         }
@@ -153,7 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .with_upgrades()
                     .await
                 {
-                    eprintln!("Error serving connection: {:?}", err);
+                    tracing::error!("Error serving API: {:?}", err);
                 }
             });
         }

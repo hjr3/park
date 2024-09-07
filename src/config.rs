@@ -35,6 +35,7 @@ pub struct Server {
     /// Options:
     /// - IP address and port
     /// - URL
+    #[serde(deserialize_with = "deserialize_address")]
     pub address: Url,
 
     /// listen for requests on a given IP address and port. Defaults to 127.0.0.1:3000
@@ -57,6 +58,22 @@ pub struct Server {
     ///
     /// Required if the address is an https address
     pub ssl_cert: Option<String>,
+}
+
+fn deserialize_address<'de, D>(deserializer: D) -> Result<Url, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let url = Url::deserialize(deserializer)?;
+
+    if !url.has_host() {
+        return Err(serde::de::Error::custom("missing host"));
+    }
+
+    match url.scheme() {
+        "http" | "https" => Ok(url),
+        _ => Err(serde::de::Error::custom("scheme must be http or https")),
+    }
 }
 
 fn default_bind() -> SocketAddr {
