@@ -9,8 +9,6 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use park::config::Config;
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let matches = Command::new("park")
@@ -35,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .get_matches();
 
-    let config: Config = if let Some(address) = matches.get_one::<String>("address") {
+    let config: park::Config = if let Some(address) = matches.get_one::<String>("address") {
         let address = if let Ok(socket) = address.parse::<SocketAddr>() {
             url::Url::parse(&format!("http://{}", socket))?
         } else if let Ok(url) = url::Url::parse(address) {
@@ -82,16 +80,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    let state = park::app(&config).await?;
     let config = Arc::new(config);
-    let client = reqwest::ClientBuilder::new()
-        .timeout(std::time::Duration::from_secs(config.server.server_timeout))
-        .build()?;
-    let db = park::db::init_db(&config.database).await?;
-
-    let state = park::AppState { db, client };
-
-    let mut conn = state.db.acquire().await?;
-    sqlx::migrate!().run(&mut conn).await?;
 
     let proxy_config = config.clone();
     let proxy_state = state.clone();
@@ -121,9 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .title_case_headers(true)
                     .serve_connection(
                         io,
-                        service_fn(move |req| {
-                            park::proxy::proxy(config.clone(), state.clone(), req)
-                        }),
+                        service_fn(move |req| park::proxy(config.clone(), state.clone(), req)),
                     )
                     .with_upgrades()
                     .await
@@ -160,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if let Err(err) = http1::Builder::new()
                     .serve_connection(
                         io,
-                        service_fn(move |req| park::api::api(config.clone(), state.clone(), req)),
+                        service_fn(move |req| park::api(config.clone(), state.clone(), req)),
                     )
                     .with_upgrades()
                     .await
