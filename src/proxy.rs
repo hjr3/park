@@ -14,7 +14,6 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::config;
-use crate::db;
 use crate::har;
 use crate::AppState;
 
@@ -29,7 +28,7 @@ where
     B::Error: Into<anyhow::Error> + std::fmt::Display,
     hyper::body::Bytes: From<<B as hyper::body::Body>::Data>,
 {
-    tracing::info!("{:?}", req);
+    tracing::trace!("{:?}", req);
 
     if Method::CONNECT == req.method() {
         // Received an HTTP request like:
@@ -180,8 +179,8 @@ where
             };
 
             let har = har::Har::from_transaction(har_req, har_resp).await;
-            let _ = db::insert_request(&state.db, &har).await.map_err(|e| {
-                tracing::error!("Error while saving HAR: {}", e);
+            let _ = state.har_queue.send(har).await.map_err(|e| {
+                tracing::error!("Error while queueing HAR: {}", e);
             });
         });
 

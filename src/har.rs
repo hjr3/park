@@ -168,3 +168,31 @@ async fn body_to_string<T: BodyExt>(body: T) -> Option<String> {
         })
         .ok()
 }
+
+pub mod writer {
+    use sqlx::sqlite::SqlitePool;
+    use tokio::sync::mpsc;
+
+    use crate::db;
+    use crate::har::Har;
+
+    pub async fn queue(db: SqlitePool) -> mpsc::Sender<Har> {
+        let mut buffer: Vec<Har> = Vec::with_capacity(1000);
+        let (tx, mut rx) = mpsc::channel(1000);
+        tokio::spawn(async move {
+            loop {
+                let count = rx.recv_many(&mut buffer, 100).await;
+                if count == 0 {
+                    tracing::debug!("har writer channel has been closed");
+                    return;
+                }
+
+                let _ = db::insert_request(&db, &mut buffer).await.map_err(|e| {
+                    tracing::error!("Error while saving HAR: {}", e);
+                });
+            }
+        });
+
+        tx
+    }
+}

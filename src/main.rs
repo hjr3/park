@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .arg(
             Arg::new("config")
-                .short('f')
+                .short('c')
                 .long("config")
                 .help("Path to the configuration file")
                 .value_name("FILE")

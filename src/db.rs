@@ -1,5 +1,6 @@
 use anyhow::Result;
 use sqlx::sqlite::SqlitePool;
+use sqlx::QueryBuilder;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -47,41 +48,44 @@ pub async fn init_db(db_config: &config::Database) -> Result<SqlitePool> {
     Ok(pool)
 }
 
-pub async fn insert_request(pool: &SqlitePool, har: &Har) -> Result<Uuid> {
+pub async fn insert_request(pool: &SqlitePool, har: &mut Vec<Har>) -> Result<()> {
     tracing::trace!("insert_request");
     let mut conn = pool.acquire().await?;
 
-    let query = r#"
+    let mut query = QueryBuilder::new(
+        r#"
         INSERT INTO requests
         (
             request_id,
             har,
             created_at
-        )
-        VALUES (
-            ?,
-            jsonb(?),
-            strftime('%s','now')
-        )
-    "#;
+        )"#,
+    );
 
-    let request_id = Uuid::now_v7();
-    let har_json = serde_json::to_string(har).map_err(|err| {
-        tracing::error!("Failed to serialize HAR to JSON");
-        err
-    })?;
+    let iter = har
+        .drain(..)
+        .map(|har| {
+            let request_id = Uuid::now_v7();
+            match serde_json::to_string(&har) {
+                Ok(har_json) => Ok((request_id, har_json)),
+                Err(err) => {
+                    tracing::error!("Failed to serialize HAR to JSON");
+                    Err(err)
+                }
+            }
+        })
+        .filter_map(Result::ok);
 
-    sqlx::query(query)
-        .bind(&request_id.to_string())
-        .bind(&har_json)
-        .execute(&mut *conn)
-        .await
-        .map_err(|err| {
-            tracing::error!("Failed to save request. {:?}", &har);
-            err
-        })?;
+    query.push_values(iter, |mut b, (request_id, har_json)| {
+        b.push_bind(request_id.to_string())
+            .push_bind(har_json)
+            .push("strftime('%s','now')");
+    });
 
-    Ok(request_id)
+    let query = query.build();
+    query.execute(&mut *conn).await?;
+
+    Ok(())
 }
 
 pub async fn latest_request(pool: &SqlitePool) -> Result<Option<Har>> {
