@@ -56,8 +56,13 @@ pub struct Server {
 
     /// The path to the SSL certificate pem file
     ///
-    /// Required if the address is an https address
+    /// Required if the listener uses TLS
     pub ssl_cert: Option<String>,
+
+    /// The path to the SSL private key pem file
+    ///
+    /// Required if the listener uses TLS
+    pub ssl_key: Option<String>,
 }
 
 fn deserialize_address<'de, D>(deserializer: D) -> Result<Url, D::Error>

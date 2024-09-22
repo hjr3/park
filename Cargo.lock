@@ -1364,10 +1364,12 @@ dependencies = [
  "hyper",
  "hyper-util",
  "reqwest",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "sqlx",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "toml",
  "tracing",
@@ -1732,6 +1734,7 @@ version = "0.23.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c58f8c84392efc0a126acce10fa59ff7b3d2ac06ab451a33f2741989b806b044"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",

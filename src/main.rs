@@ -3,9 +3,11 @@ use std::sync::Arc;
 
 use clap::{Arg, Command};
 use futures_util::future::join;
+use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
+use hyper::Request;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -103,6 +105,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let proxy_config = config.clone();
     let proxy_state = state.clone();
     let proxy_srv = async move {
+        let tls_acceptor =
+            if proxy_config.server.ssl_cert.is_some() && proxy_config.server.ssl_key.is_some() {
+                let rustls_config = tls::rustls_server_config(
+                    proxy_config.server.ssl_key.as_ref().unwrap(),
+                    proxy_config.server.ssl_cert.as_ref().unwrap(),
+                );
+
+                Some(tokio_rustls::TlsAcceptor::from(rustls_config))
+            } else {
+                None
+            };
+
         let listener = TcpListener::bind(proxy_config.server.bind)
             .await
             .expect("Proxy failed to bind");
@@ -113,29 +127,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .expect("Proxy failed to get local address")
         );
         loop {
-            let (stream, _) = listener
+            let (cnx, addr) = listener
                 .accept()
                 .await
                 .expect("Proxy failed to accept connection");
 
-            let io = TokioIo::new(stream);
-
             let config = proxy_config.clone();
             let state = proxy_state.clone();
-            tokio::task::spawn(async move {
-                if let Err(err) = http1::Builder::new()
-                    .preserve_header_case(true)
-                    .title_case_headers(true)
-                    .serve_connection(
-                        io,
-                        service_fn(move |req| park::proxy(config.clone(), state.clone(), req)),
-                    )
-                    .with_upgrades()
-                    .await
-                {
-                    tracing::error!("Error serving proxy: {:?}", err);
-                }
+            let service = service_fn(move |req: Request<Incoming>| {
+                park::proxy(config.clone(), state.clone(), req)
             });
+
+            let mut server = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+
+            server
+                .http1()
+                .preserve_header_case(true)
+                .title_case_headers(true);
+
+            server.http2().max_concurrent_streams(200);
+
+            match tls_acceptor.clone() {
+                Some(tls_acceptor) => {
+                    let stream = tls_acceptor
+                        .accept(cnx)
+                        .await
+                        .map_err(|err| {
+                            tracing::error!("TLS error: {:?} for {:?}", err, addr);
+                            err
+                        })
+                        .expect("TLS failed to accept connection");
+
+                    tokio::task::spawn(async move {
+                        let io = TokioIo::new(stream);
+                        if let Err(err) = server.serve_connection_with_upgrades(io, service).await {
+                            tracing::error!("Error serving TLS proxy: {:?}", err);
+                        }
+                    });
+                }
+                None => {
+                    tokio::task::spawn(async move {
+                        let io = TokioIo::new(cnx);
+                        if let Err(err) = server.serve_connection_with_upgrades(io, service).await {
+                            tracing::error!("Error serving proxy: {:?}", err);
+                        }
+                    });
+                }
+            }
         }
     };
 
@@ -179,4 +217,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _ret = join(proxy_srv, api_srv).await;
 
     Ok(())
+}
+
+mod tls {
+    use rustls_pemfile::{certs, pkcs8_private_keys};
+    use std::{fs::File, io::BufReader, path::Path, sync::Arc};
+    use tokio_rustls::rustls::pki_types::PrivateKeyDer;
+    use tokio_rustls::rustls::ServerConfig;
+
+    pub fn rustls_server_config(
+        key: impl AsRef<Path>,
+        cert: impl AsRef<Path>,
+    ) -> Arc<ServerConfig> {
+        let mut key_reader = BufReader::new(File::open(key).unwrap());
+        let mut cert_reader = BufReader::new(File::open(cert).unwrap());
+
+        let key = match pkcs8_private_keys(&mut key_reader).next() {
+            Some(Ok(key)) => PrivateKeyDer::Pkcs8(key),
+            Some(Err(err)) => panic!("bad key: {:?}", err),
+            None => panic!("no keys found"),
+        };
+        let certs = certs(&mut cert_reader).flatten().collect();
+
+        let mut config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("bad certificate/key");
+
+        // TODO allow users to configure upstream ALPN protocols
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+        Arc::new(config)
+    }
 }

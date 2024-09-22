@@ -96,10 +96,21 @@ where
 
         upstream_url.set_path(head.uri.path());
 
+        // FIXME: properly upgrade/downgrade HTTP version
+        // see https://www.rfc-editor.org/rfc/rfc9110.html#name-to-a-proxy
+        let version = if head.version == http::Version::HTTP_2 && upstream_url.scheme() == "http" {
+            http::Version::HTTP_11
+        } else {
+            head.version
+        };
+
         let upstream_req = state
             .client
             .request(From::from(&head.method), upstream_url)
-            .version(head.version)
+            .version(version)
+            // FIXME: make sure we are only sending valid headers
+            // examples: HTTP/1.1 Connection header is not allowed for HTTP/2
+            // see https://github.com/hyperium/hyper/discussions/3404
             .headers(head.headers.clone())
             .body(reqwest::Body::wrap_stream(upstream_stream))
             .build()?;
